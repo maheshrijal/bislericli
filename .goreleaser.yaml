@@ -1,0 +1,47 @@
+version: 2
+
+project_name: bislericli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: bislericli
+    main: ./cmd/bislericli
+    binary: bislericli
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: bislericli
+    directory: Formula
+    homepage: https://github.com/maheshrijal/bislericli
+    description: Unofficial Bisleri order tracker CLI
+    license: MIT
+    repository:
+      owner: maheshrijal
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: Mahesh Rijal
+      email: 62394512+maheshrijal@users.noreply.github.com
+    test: |
+      system "#{bin}/bislericli", "version"
+    install: |
+      bin.install "bislericli"
