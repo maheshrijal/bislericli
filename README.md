@@ -105,16 +105,3 @@ Files:
 
 - `config.json` (global defaults, current profile)
 - `profiles/<name>.json` (cookies + address)
-
-## Notes
-
-- The CLI uses the **Bisleri Wallet** payment method. Ensure your wallet is funded; otherwise the order will fail.
-- If no default address is detected, the CLI will prompt you to choose one and fill any missing fields.
-- This tool avoids CAPTCHA/waf triggers by throttling requests.
-
-## Security Note
-
-> [!WARNING]
-> Session cookies are stored in **plaintext JSON files** in your configuration directory (`~/Library/Application Support/bislericli/profiles/`).
-> Ensure your computer is secure and do not share these files. Support for OS-native keychain storage is planned.
-
