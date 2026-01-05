@@ -23,7 +23,7 @@ go build -o bislericli ./cmd/bislericli
 Capture login (opens Chrome, you log in manually):
 
 ```bash
-bislericli auth login --profile personal
+bislericli auth login
 ```
 
 ## Usage
@@ -31,7 +31,7 @@ bislericli auth login --profile personal
 Place an order (default: 2 jars, return 2 empty jars):
 
 ```bash
-bislericli order --profile personal
+bislericli order
 ```
 
 Override defaults:
@@ -49,7 +49,7 @@ bislericli order --allow-extra
 Check auth status:
 
 ```bash
-bislericli auth status --profile personal
+bislericli auth status
 ```
 
 List profiles:
