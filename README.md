@@ -8,7 +8,13 @@ Unofficial CLI to place Bisleri 20L jar orders quickly. Not affiliated with or e
 - Default delivery address configured on bisleri.com.
 - Go 1.22+ to build.
 
-## Setup
+### Install via Homebrew
+
+```bash
+brew install maheshrijal/tap/bislericli
+```
+
+### Build from source
 
 ```bash
 go build -o bislericli ./cmd/bislericli
@@ -17,7 +23,7 @@ go build -o bislericli ./cmd/bislericli
 Capture login (opens Chrome, you log in manually):
 
 ```bash
-./bislericli auth login --profile personal
+bislericli auth login --profile personal
 ```
 
 ## Usage
@@ -25,67 +31,67 @@ Capture login (opens Chrome, you log in manually):
 Place an order (default: 2 jars, return 2 empty jars):
 
 ```bash
-./bislericli order --profile personal
+bislericli order --profile personal
 ```
 
 Override defaults:
 
 ```bash
-./bislericli order --qty 3 --return 1
+bislericli order --qty 3 --return 1
 ```
 
 Allow order if other cart items exist:
 
 ```bash
-./bislericli order --allow-extra
+bislericli order --allow-extra
 ```
 
 Check auth status:
 
 ```bash
-./bislericli auth status --profile personal
+bislericli auth status --profile personal
 ```
 
 List profiles:
 
 ```bash
-./bislericli profile list
+bislericli profile list
 ```
 
 Set current profile:
 
 ```bash
-./bislericli profile use personal
+bislericli profile use personal
 ```
 
 Sync order history (caches data locally):
 
 ```bash
-./bislericli sync
+bislericli sync
 ```
 
 View order history (from cache or live):
 
 ```bash
-./bisleri orders --limit 5
+bislericli orders --limit 5
 ```
 
 Analyze spending habits:
 
 ```bash
-./bisleri stats
+bislericli stats
 ```
 
 View ordering patterns (day/time):
 
 ```bash
-./bisleri stats --view-patterns
+bislericli stats --view-patterns
 ```
 
 Show config location:
 
 ```bash
-./bisleri config show
+bislericli config show
 ```
 
 ## Configuration
