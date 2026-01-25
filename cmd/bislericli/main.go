@@ -193,12 +193,7 @@ func runAuth(args []string) error {
 
 			cookies, err = auth.LoginWithOTP(context.Background(), phoneNumber)
 			if err != nil {
-				fmt.Printf("OTP login failed: %v\n", err)
-				fmt.Println("Falling back to browser login...")
-				cookies, err = auth.Login(context.Background())
-				if err != nil {
-					return err
-				}
+				return fmt.Errorf("login failed: %w", err)
 			}
 		}
 

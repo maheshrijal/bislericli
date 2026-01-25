@@ -129,13 +129,13 @@ func LoginWithOTP(ctx context.Context, phoneNumber string) ([]store.Cookie, erro
 }
 
 func getCSRFToken(ctx context.Context, client *http.Client) (string, error) {
-	// First, visit the homepage to establish a session
-	req, err := http.NewRequestWithContext(ctx, "GET", bisleriBaseURL+"/home", nil)
+	// Call the login popup endpoint to get session and CSRF token
+	req, err := http.NewRequestWithContext(ctx, "GET", bisleriBaseURL+"/on/demandware.store/Sites-Bis-Site/default/Account-ShowLoginPopUp", nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -143,68 +143,26 @@ func getCSRFToken(ctx context.Context, client *http.Client) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	// Read the page to extract CSRF token
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
 
-	// Try to extract CSRF token from the page
-	// Look for patterns like: csrf_token" value="..." or data-csrf="..."
-	csrfPatterns := []string{
-		`name="csrf_token"\s+value="([^"]+)"`,
-		`value="([^"]+)"\s+name="csrf_token"`,
-		`data-csrf="([^"]+)"`,
-		`"csrf_token":"([^"]+)"`,
-		`csrf_token=([^&"'\s]+)`,
-	}
-
-	for _, pattern := range csrfPatterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindSubmatch(body); len(matches) > 1 {
-			return string(matches[1]), nil
-		}
-	}
-
-	// If no CSRF token found in page, try calling the login popup endpoint
-	popupReq, err := http.NewRequestWithContext(ctx, "GET", bisleriBaseURL+"/on/demandware.store/Sites-Bis-Site/default/Account-ShowLoginPopUp", nil)
-	if err != nil {
-		return "", err
-	}
-	popupReq.Header.Set("User-Agent", userAgent)
-	popupReq.Header.Set("X-Requested-With", "XMLHttpRequest")
-	popupReq.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
-
-	popupResp, err := client.Do(popupReq)
-	if err != nil {
-		return "", err
-	}
-	defer popupResp.Body.Close()
-
-	popupBody, err := io.ReadAll(popupResp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	// Try to extract from JSON response
+	// The response is JSON with globalHtml containing the form with csrf_token
 	var popupData struct {
-		CSRF struct {
-			Token string `json:"token"`
-		} `json:"csrf"`
+		GlobalHTML string `json:"globalHtml"`
 	}
-	if json.Unmarshal(popupBody, &popupData) == nil && popupData.CSRF.Token != "" {
-		return popupData.CSRF.Token, nil
+	if err := json.Unmarshal(body, &popupData); err != nil {
+		return "", fmt.Errorf("failed to parse login popup response: %w", err)
 	}
 
-	// Try regex on popup response
-	for _, pattern := range csrfPatterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindSubmatch(popupBody); len(matches) > 1 {
-			return string(matches[1]), nil
-		}
+	// Extract csrf_token from the HTML
+	csrfPattern := regexp.MustCompile(`name="csrf_token"\s+value="([^"]+)"`)
+	if matches := csrfPattern.FindStringSubmatch(popupData.GlobalHTML); len(matches) > 1 {
+		return matches[1], nil
 	}
 
-	return "", errors.New("could not find CSRF token")
+	return "", errors.New("could not find CSRF token in login popup")
 }
 
 func sendOTP(ctx context.Context, client *http.Client, phoneNumber, csrfToken string) error {
