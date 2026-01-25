@@ -46,6 +46,7 @@ type Profile struct {
 	AddressID     string     `json:"addressId"`
 	Address       *Address   `json:"address,omitempty"`
 	PreferredCity string     `json:"preferredCity,omitempty"`
+	PhoneNumber   string     `json:"phoneNumber,omitempty"`
 	LastLogin     time.Time  `json:"lastLogin"`
 	LastOrder     *OrderInfo `json:"lastOrder,omitempty"`
 	AddressSource string     `json:"addressSource,omitempty"`
