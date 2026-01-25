@@ -177,11 +177,15 @@ func runAuth(args []string) error {
 				input, _ := reader.ReadString('\n')
 				phoneNumber = strings.TrimSpace(input)
 			}
-			// Clean phone number (remove +91, spaces, etc.)
-			phoneNumber = strings.TrimPrefix(phoneNumber, "+91")
-			phoneNumber = strings.TrimPrefix(phoneNumber, "91")
+			// Clean phone number (remove spaces, dashes first)
 			phoneNumber = strings.ReplaceAll(phoneNumber, " ", "")
 			phoneNumber = strings.ReplaceAll(phoneNumber, "-", "")
+			// Only strip country code if number is too long
+			if strings.HasPrefix(phoneNumber, "+91") && len(phoneNumber) == 13 {
+				phoneNumber = strings.TrimPrefix(phoneNumber, "+91")
+			} else if strings.HasPrefix(phoneNumber, "91") && len(phoneNumber) == 12 {
+				phoneNumber = strings.TrimPrefix(phoneNumber, "91")
+			}
 
 			if len(phoneNumber) != 10 {
 				return fmt.Errorf("invalid phone number: must be 10 digits, got %d", len(phoneNumber))
