@@ -199,6 +199,59 @@ func AddressIsComplete(addr store.Address) bool {
 }
 
 func ExtractWalletBalance(html string) (string, bool) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err == nil {
+		// Primary: Look for specific wallet balance classes used in payment page
+		selectors := []string{
+			".wallet-amount-balance-green",
+			".wallet-amount-balance",
+			".bisleri-wallet .balance",
+			".payment-method .wallet-balance",
+			"[data-wallet-balance]",
+		}
+		for _, sel := range selectors {
+			if val := strings.TrimSpace(doc.Find(sel).First().Text()); val != "" {
+				// Ensure it contains a currency symbol or amount
+				if strings.Contains(val, "₹") || regexp.MustCompile(`\d`).MatchString(val) {
+					// Normalize format
+					if !strings.Contains(val, "₹") {
+						val = "₹" + val
+					}
+					return val, true
+				}
+			}
+		}
+
+		// Secondary: Look for wallet input/label combo in payment form
+		walletSection := doc.Find(".bisleri-wallet, .form-check.bisleri-wallet").First()
+		if walletSection.Length() > 0 {
+			// Look for price within this section
+			walletSection.Find("p, span, div").Each(func(_ int, s *goquery.Selection) {
+				text := strings.TrimSpace(s.Text())
+				if strings.Contains(text, "₹") && !strings.Contains(strings.ToLower(text), "wallet") {
+					// This is likely the balance amount
+					if val := text; val != "" {
+						return
+					}
+				}
+			})
+		}
+	}
+
+	// Fallback to regex - but be more specific to avoid nav links
+	// Look for balance in the context of payment/billing form
+	formPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?s)class="[^"]*wallet[^"]*balance[^"]*"[^>]*>₹?\s*([0-9.,]+)`),
+		regexp.MustCompile(`(?s)wallet-amount[^>]*>₹?\s*([0-9.,]+)`),
+		regexp.MustCompile(`(?s)dwfrm_billing.*?Bisleri Wallet.*?₹\s*([0-9.,]+)`),
+	}
+	for _, re := range formPatterns {
+		if match := re.FindStringSubmatch(html); len(match) > 1 {
+			return "₹" + strings.TrimPrefix(match[1], "₹"), true
+		}
+	}
+
+	// Last resort: original regex
 	match := walletRegex.FindStringSubmatch(html)
 	if len(match) > 1 {
 		return "₹" + match[1], true
