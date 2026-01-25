@@ -128,6 +128,8 @@ func runAuth(args []string) error {
 	case "login":
 		fs := flag.NewFlagSet("auth login", flag.ContinueOnError)
 		profileName := fs.String("profile", "", "profile name")
+		method := fs.String("method", "otp", "login method: otp (default) or browser")
+		phone := fs.String("phone", "", "phone number (10 digits, will prompt if not provided)")
 		if err := fs.Parse(subArgs); err != nil {
 			return err
 		}
@@ -136,18 +138,84 @@ func runAuth(args []string) error {
 			return err
 		}
 		name := resolveProfileName(*profileName, cfg)
-		_, profilePath, err := loadOrCreateProfile(name)
+		existingProfile, profilePath, err := loadOrCreateProfile(name)
 		if err != nil {
 			return err
 		}
-		cookies, err := auth.Login(context.Background())
-		if err != nil {
-			return err
+
+		var cookies []store.Cookie
+		var phoneNumber string
+
+		switch *method {
+		case "browser":
+			// Use browser-based login
+			cookies, err = auth.Login(context.Background())
+			if err != nil {
+				return err
+			}
+		case "otp":
+			fallthrough
+		default:
+			// Use OTP-based login (default)
+			phoneNumber = *phone
+			if phoneNumber == "" && existingProfile.PhoneNumber != "" {
+				// Use saved phone number
+				fmt.Printf("Phone number [%s]: ", existingProfile.PhoneNumber)
+				reader := bufio.NewReader(os.Stdin)
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(input)
+				if input == "" {
+					phoneNumber = existingProfile.PhoneNumber
+				} else {
+					phoneNumber = input
+				}
+			}
+			if phoneNumber == "" {
+				// Prompt for phone number
+				fmt.Print("Phone number: ")
+				reader := bufio.NewReader(os.Stdin)
+				input, _ := reader.ReadString('\n')
+				phoneNumber = strings.TrimSpace(input)
+			}
+			// Clean phone number (remove spaces, dashes first)
+			phoneNumber = strings.ReplaceAll(phoneNumber, " ", "")
+			phoneNumber = strings.ReplaceAll(phoneNumber, "-", "")
+			// Only strip country code if number is too long
+			if strings.HasPrefix(phoneNumber, "+91") && len(phoneNumber) == 13 {
+				phoneNumber = strings.TrimPrefix(phoneNumber, "+91")
+			} else if strings.HasPrefix(phoneNumber, "91") && len(phoneNumber) == 12 {
+				phoneNumber = strings.TrimPrefix(phoneNumber, "91")
+			}
+
+			if len(phoneNumber) != 10 {
+				return fmt.Errorf("invalid phone number: must be 10 digits, got %d", len(phoneNumber))
+			}
+
+			cookies, err = auth.LoginWithOTP(context.Background(), phoneNumber)
+			if err != nil {
+				return fmt.Errorf("login failed: %w", err)
+			}
 		}
+
 		profile := store.Profile{
-			Name:      name,
-			Cookies:   cookies,
-			LastLogin: time.Now(),
+			Name:        name,
+			Cookies:     cookies,
+			PhoneNumber: phoneNumber,
+			LastLogin:   time.Now(),
+		}
+
+		// Preserve existing profile data
+		if existingProfile.AddressID != "" {
+			profile.AddressID = existingProfile.AddressID
+		}
+		if existingProfile.Address != nil {
+			profile.Address = existingProfile.Address
+		}
+		if existingProfile.PreferredCity != "" {
+			profile.PreferredCity = existingProfile.PreferredCity
+		}
+		if phoneNumber == "" && existingProfile.PhoneNumber != "" {
+			profile.PhoneNumber = existingProfile.PhoneNumber
 		}
 
 		if err := store.SaveProfile(profilePath, profile); err != nil {
@@ -184,6 +252,9 @@ func runAuth(args []string) error {
 			fmt.Println(format.KeyValue("Address", profile.Address.Address1))
 		} else {
 			fmt.Println(format.KeyValue("Address", "not set"))
+		}
+		if profile.PhoneNumber != "" {
+			fmt.Println(format.KeyValue("Phone", profile.PhoneNumber))
 		}
 		return nil
 	case "logout":

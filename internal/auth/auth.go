@@ -3,12 +3,15 @@ package auth
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,7 +22,11 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-const bisleriHome = "https://www.bisleri.com/home"
+const (
+	bisleriHome    = "https://www.bisleri.com/home"
+	bisleriBaseURL = "https://www.bisleri.com"
+	userAgent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 func Login(ctx context.Context) ([]store.Cookie, error) {
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -64,6 +71,221 @@ func Login(ctx context.Context) ([]store.Cookie, error) {
 	// Let the deferred cancels close the browser context.
 	time.Sleep(300 * time.Millisecond)
 	return filtered, nil
+}
+
+// LoginWithOTP performs a terminal-based login using phone number and OTP.
+// This is the primary login method that doesn't require a browser.
+func LoginWithOTP(ctx context.Context, phoneNumber string) ([]store.Cookie, error) {
+	// Create HTTP client with cookie jar
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cookie jar: %w", err)
+	}
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 30 * time.Second,
+	}
+
+	// Step 1: Get initial session and CSRF token
+	fmt.Println("Connecting to Bisleri...")
+	csrfToken, err := getCSRFToken(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session: %w", err)
+	}
+
+	// Step 2: Send OTP
+	fmt.Printf("Sending OTP to +91%s...\n", phoneNumber)
+	if err := sendOTP(ctx, client, phoneNumber, csrfToken); err != nil {
+		return nil, fmt.Errorf("failed to send OTP: %w", err)
+	}
+	fmt.Println("OTP sent successfully!")
+
+	// Step 3: Prompt for OTP
+	fmt.Print("Enter OTP: ")
+	reader := bufio.NewReader(os.Stdin)
+	otpInput, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read OTP: %w", err)
+	}
+	otp := strings.TrimSpace(otpInput)
+	if len(otp) != 6 {
+		return nil, errors.New("OTP must be 6 digits")
+	}
+
+	// Step 4: Verify OTP
+	fmt.Println("Verifying OTP...")
+	cookies, err := verifyOTP(ctx, client, phoneNumber, otp, csrfToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify OTP: %w", err)
+	}
+
+	// Step 5: Verify the cookies work
+	if err := verifyCookies(cookies); err != nil {
+		return nil, fmt.Errorf("login succeeded but session invalid: %w", err)
+	}
+
+	fmt.Println("Login successful!")
+	return cookies, nil
+}
+
+func getCSRFToken(ctx context.Context, client *http.Client) (string, error) {
+	// Call the login popup endpoint to get session and CSRF token
+	req, err := http.NewRequestWithContext(ctx, "GET", bisleriBaseURL+"/on/demandware.store/Sites-Bis-Site/default/Account-ShowLoginPopUp", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// The response is JSON with globalHtml containing the form with csrf_token
+	var popupData struct {
+		GlobalHTML string `json:"globalHtml"`
+	}
+	if err := json.Unmarshal(body, &popupData); err != nil {
+		return "", fmt.Errorf("failed to parse login popup response: %w", err)
+	}
+
+	// Extract csrf_token from the HTML
+	csrfPattern := regexp.MustCompile(`name="csrf_token"\s+value="([^"]+)"`)
+	if matches := csrfPattern.FindStringSubmatch(popupData.GlobalHTML); len(matches) > 1 {
+		return matches[1], nil
+	}
+
+	return "", errors.New("could not find CSRF token in login popup")
+}
+
+func sendOTP(ctx context.Context, client *http.Client, phoneNumber, csrfToken string) error {
+	form := url.Values{}
+	form.Set("mobileNumber", phoneNumber)
+	form.Set("csrf_token", csrfToken)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		bisleriBaseURL+"/on/demandware.store/Sites-Bis-Site/default/Account-SendOTP",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	req.Header.Set("Origin", bisleriBaseURL)
+	req.Header.Set("Referer", bisleriBaseURL+"/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned %s: %s", resp.Status, string(body))
+	}
+
+	// Check response
+	var result struct {
+		Response struct {
+			Status string `json:"Status"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(body, &result); err == nil {
+		if result.Response.Status != "Success" {
+			return fmt.Errorf("OTP send failed: %s", result.Response.Status)
+		}
+	}
+
+	return nil
+}
+
+func verifyOTP(ctx context.Context, client *http.Client, phoneNumber, otp, csrfToken string) ([]store.Cookie, error) {
+	form := url.Values{}
+	form.Set("mobileNumber", phoneNumber)
+	form.Set("OTP", otp)
+	form.Set("csrf_token", csrfToken)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		bisleriBaseURL+"/on/demandware.store/Sites-Bis-Site/default/Account-CheckCustomer",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	req.Header.Set("Origin", bisleriBaseURL)
+	req.Header.Set("Referer", bisleriBaseURL+"/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("verification failed: %s", resp.Status)
+	}
+
+	// Check for error response
+	var errorResult struct {
+		Error   bool   `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &errorResult) == nil && errorResult.Error {
+		return nil, fmt.Errorf("OTP verification failed: %s", errorResult.Message)
+	}
+
+	// Extract cookies from the jar
+	u, _ := url.Parse(bisleriBaseURL)
+	httpCookies := client.Jar.Cookies(u)
+
+	var cookies []store.Cookie
+	for _, c := range httpCookies {
+		if !strings.Contains(c.Domain, "bisleri") && c.Domain != "" {
+			continue
+		}
+		domain := c.Domain
+		if domain == "" {
+			domain = ".bisleri.com"
+		}
+		cookies = append(cookies, store.Cookie{
+			Name:     c.Name,
+			Value:    c.Value,
+			Domain:   domain,
+			Path:     c.Path,
+			Secure:   c.Secure,
+			HTTPOnly: c.HttpOnly,
+		})
+	}
+
+	if len(cookies) == 0 {
+		return nil, errors.New("no session cookies received after login")
+	}
+
+	return cookies, nil
 }
 
 type loginProbe struct {
