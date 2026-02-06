@@ -25,6 +25,9 @@ func runStats(args []string) error {
 	profileName := fs.String("profile", "", "Profile name to use (default: current/default)")
 	viewPatterns := fs.Bool("view-patterns", false, "Analyze ordering patterns (day/time) instead of monthly history")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
@@ -44,7 +47,7 @@ func runStats(args []string) error {
 	history, err := store.LoadOrderHistory(name)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return errors.New("no synced data found; run 'bisleri sync' first")
+			return errors.New("no synced data found; run 'bislericli sync' first")
 		}
 		return fmt.Errorf("failed to load history: %w", err)
 	}
@@ -75,9 +78,9 @@ func printMonthlyStats(orders []store.SavedOrder) {
 	for _, o := range orders {
 		// Skip invalid orders
 		if o.Amount == 0 && o.Total != "0" && o.Total != "Free" {
-             // Maybe try fix? Already fixed in sync
+			// Maybe try fix? Already fixed in sync
 		}
-		
+
 		t := o.ParsedDate
 		if t.IsZero() {
 			continue
@@ -95,7 +98,7 @@ func printMonthlyStats(orders []store.SavedOrder) {
 
 		grandTotal += o.Amount
 		totalOrders++
-		
+
 		dStr := t.Format("2006-01-02")
 		if earliest == "" || dStr < earliest {
 			earliest = dStr
@@ -104,7 +107,6 @@ func printMonthlyStats(orders []store.SavedOrder) {
 			latest = dStr
 		}
 	}
-
 
 	// Sort keys
 	var keys []string
@@ -136,12 +138,12 @@ func printMonthlyStats(orders []store.SavedOrder) {
 	fmt.Fprintln(w, "+----------+---------------+---------------+---------------+---------------+")
 	fmt.Fprintln(w, "| Orders\t| Total\t| Average\t| Earliest\t| Latest\t|")
 	fmt.Fprintln(w, "+----------+---------------+---------------+---------------+---------------+")
-	
+
 	grandAvg := 0.0
 	if totalOrders > 0 {
 		grandAvg = grandTotal / float64(totalOrders)
 	}
-	
+
 	fmt.Fprintf(w, "| %d\t| ₹%.2f\t| ₹%.2f\t| %s\t| %s\t|\n", totalOrders, grandTotal, grandAvg, earliest, latest)
 	fmt.Fprintln(w, "+----------+---------------+---------------+---------------+---------------+")
 	w.Flush()
@@ -175,7 +177,7 @@ func printPatterns(orders []store.SavedOrder) {
 
 	// Order from Monday to Sunday
 	weekdays := []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday}
-	
+
 	for _, d := range weekdays {
 		count := dowMap[d]
 		share := 0.0
