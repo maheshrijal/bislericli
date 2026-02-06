@@ -20,6 +20,9 @@ func runSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	profileName := fs.String("profile", "", "Profile name (default: current/default)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
@@ -35,7 +38,7 @@ func runSync(args []string) error {
 	}
 
 	if len(profile.Cookies) == 0 {
-		return errors.New("no cookies in profile; run 'bisleri auth login'")
+		return errors.New("no cookies in profile; run 'bislericli auth login'")
 	}
 
 	jar, err := bisleri.JarFromCookies(profile.Cookies)
@@ -57,7 +60,7 @@ func runSync(args []string) error {
 	// Check auth
 	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
 		if !strings.Contains(resp.Request.URL.Path, "/my-orders") {
-			return errors.New("session expired; please run 'bisleri auth login'")
+			return errors.New("session expired; please run 'bislericli auth login'")
 		}
 	}
 
@@ -72,7 +75,7 @@ func runSync(args []string) error {
 	var savedOrders []store.SavedOrder
 	for _, o := range parsedOrders {
 		amount, _ := bisleri.ParseINRAmount(o.Total)
-		
+
 		// Parse date for sorting/stats
 		// Format seen: "05/01/2026, 11:49 AM"
 		cleanedDate := strings.Split(o.Date, ",")[0] // Take part before comma "05/01/2026"
@@ -94,7 +97,7 @@ func runSync(args []string) error {
 				}
 			}
 		}
-		
+
 		savedOrders = append(savedOrders, store.SavedOrder{
 			OrderID:    o.OrderID,
 			Date:       o.Date,

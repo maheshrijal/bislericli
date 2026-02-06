@@ -81,9 +81,9 @@ func run() error {
 
 func printUsage() {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Println("bisleri - Bisleri Customer CLI Tool")
+	fmt.Println("bislericli - Bisleri Customer CLI Tool")
 	fmt.Println("\nUsage:")
-	fmt.Println("  bisleri <command> [flags]")
+	fmt.Println("  bislericli <command> [command flags]")
 
 	fmt.Println("\nAuthentication:")
 	fmt.Fprintln(w, "  auth login\tInteractive login to Bisleri account")
@@ -105,20 +105,16 @@ func printUsage() {
 	fmt.Fprintln(w, "  config show\tDisplay current configuration")
 	w.Flush()
 	fmt.Println("\nFlags:")
-	fmt.Println("  --profile string   Specify profile to use (default \"default\")")
 	fmt.Println("  version            Show version information")
 	fmt.Println("  --help             Show this help message")
 	fmt.Println()
-	fmt.Println("Run 'bisleri <command> --help' for specific command usage.")
+	fmt.Println("Note: flags like --profile are command-specific.")
+	fmt.Println("Run 'bislericli <command> --help' for specific command usage.")
 }
 
 func runAuth(args []string) error {
-	if len(args) < 1 {
-		fmt.Println("Usage: bisleri auth <subcommand> [flags]")
-		fmt.Println("\nAvailable subcommands:")
-		fmt.Println("  login    Interactive login to Bisleri account")
-		fmt.Println("  logout   Logout from the current session")
-		fmt.Println("  status   Check current login status")
+	if len(args) < 1 || isHelpToken(args[0]) {
+		printAuthUsage()
 		return nil
 	}
 	sub := args[0]
@@ -131,6 +127,9 @@ func runAuth(args []string) error {
 		method := fs.String("method", "otp", "login method: otp (default) or browser")
 		phone := fs.String("phone", "", "phone number (10 digits, will prompt if not provided)")
 		if err := fs.Parse(subArgs); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
 			return err
 		}
 		cfg, err := config.LoadGlobalConfig()
@@ -234,6 +233,9 @@ func runAuth(args []string) error {
 		fs := flag.NewFlagSet("auth status", flag.ContinueOnError)
 		profileName := fs.String("profile", "", "profile name")
 		if err := fs.Parse(subArgs); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
 			return err
 		}
 		cfg, err := config.LoadGlobalConfig()
@@ -261,6 +263,9 @@ func runAuth(args []string) error {
 		fs := flag.NewFlagSet("auth logout", flag.ContinueOnError)
 		profileName := fs.String("profile", "", "profile name")
 		if err := fs.Parse(subArgs); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
 			return err
 		}
 		cfg, err := config.LoadGlobalConfig()
@@ -290,17 +295,14 @@ func runAuth(args []string) error {
 		return nil
 	default:
 		fmt.Printf("Unknown auth subcommand: %s\n", sub)
-		fmt.Println("Usage: bisleri auth <subcommand> [flags]")
+		printAuthUsage()
 		return nil
 	}
 }
 
 func runProfile(args []string) error {
-	if len(args) < 1 {
-		fmt.Println("Usage: bisleri profile <subcommand>")
-		fmt.Println("\nAvailable subcommands:")
-		fmt.Println("  list   List all available profiles")
-		fmt.Println("  use    Switch to a different profile")
+	if len(args) < 1 || isHelpToken(args[0]) {
+		printProfileUsage()
 		return nil
 	}
 	sub := args[0]
@@ -327,7 +329,7 @@ func runProfile(args []string) error {
 		}
 		sort.Strings(names)
 		if len(names) == 0 {
-			fmt.Println("No profiles found. Run: bisleri auth login")
+			fmt.Println("No profiles found. Run: bislericli auth login")
 			return nil
 		}
 		for _, name := range names {
@@ -354,7 +356,7 @@ func runProfile(args []string) error {
 		return nil
 	default:
 		fmt.Printf("Unknown profile subcommand: %s\n", sub)
-		fmt.Println("Usage: bisleri profile <subcommand>")
+		printProfileUsage()
 		return nil
 	}
 }
@@ -367,6 +369,9 @@ func runOrder(args []string) error {
 	allowExtra := fs.Bool("allow-extra", false, "Proceed even if cart contains other items")
 	debug := fs.Bool("debug", false, "Enable verbose debug logging")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	cfg, err := config.LoadGlobalConfig()
@@ -379,7 +384,7 @@ func runOrder(args []string) error {
 		return err
 	}
 	if len(profile.Cookies) == 0 {
-		return errors.New("no cookies in profile; run 'bisleri auth login'")
+		return errors.New("no cookies in profile; run 'bislericli auth login'")
 	}
 
 	if *quantity == 0 {
@@ -528,7 +533,7 @@ func runOrder(args []string) error {
 			break
 		}
 	}
-	
+
 	shippingHTML, err := client.FetchShippingPage(ctx)
 	if err != nil {
 		var statusErr *bisleri.HTTPStatusError
@@ -615,7 +620,7 @@ func runOrder(args []string) error {
 				}
 				return fmt.Errorf("invalid order total detected (%s); check debug html", total)
 			}
-			
+
 			// Balance check
 			if balance, okBal := bisleri.ExtractWalletBalance(paymentHTML); okBal {
 				if balAmount, okBalPars := bisleri.ParseINRAmount(balance); okBalPars {
@@ -670,15 +675,13 @@ func runOrder(args []string) error {
 }
 
 func runConfig(args []string) error {
-	if len(args) < 1 {
-		fmt.Println("Usage: bisleri config <subcommand>")
-		fmt.Println("\nAvailable subcommands:")
-		fmt.Println("  show   Display current configuration")
+	if len(args) < 1 || isHelpToken(args[0]) {
+		printConfigUsage()
 		return nil
 	}
 	if args[0] != "show" {
 		fmt.Printf("Unknown config subcommand: %s\n", args[0])
-		fmt.Println("Usage: bisleri config <subcommand>")
+		printConfigUsage()
 		return nil // Return nil to avoid generic error printing
 	}
 	dir, err := config.ConfigDir()
@@ -700,6 +703,10 @@ func runConfig(args []string) error {
 }
 
 func runSchedule(args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		printScheduleUsage()
+		return nil
+	}
 	cfg, err := config.LoadGlobalConfig()
 	if err != nil {
 		return err
@@ -711,10 +718,8 @@ func runSchedule(args []string) error {
 }
 
 func runDebug(args []string) error {
-	if len(args) < 1 {
-		fmt.Println("Usage: bisleri debug <subcommand>")
-		fmt.Println("\nAvailable subcommands:")
-		fmt.Println("  order   Start debug order flow")
+	if len(args) < 1 || isHelpToken(args[0]) {
+		printDebugUsage()
 		return nil
 	}
 	sub := args[0]
@@ -731,16 +736,58 @@ func runDebug(args []string) error {
 			return err
 		}
 		if len(profile.Cookies) == 0 {
-			return errors.New("no cookies in profile; run 'bisleri auth login'")
+			return errors.New("no cookies in profile; run 'bislericli auth login'")
 		}
 
 		fmt.Println("Starting debug order flow for profile:", name)
 		return debug.RunOrderDebug(context.Background(), profile)
 	default:
 		fmt.Printf("Unknown debug subcommand: %s\n", sub)
-		fmt.Println("Usage: bisleri debug <subcommand>")
+		printDebugUsage()
 		return nil
 	}
+}
+
+func isHelpToken(token string) bool {
+	switch token {
+	case "help", "-h", "--help":
+		return true
+	default:
+		return false
+	}
+}
+
+func printAuthUsage() {
+	fmt.Println("Usage: bislericli auth <subcommand> [flags]")
+	fmt.Println("\nAvailable subcommands:")
+	fmt.Println("  login    Interactive login to Bisleri account")
+	fmt.Println("  logout   Logout from the current session")
+	fmt.Println("  status   Check current login status")
+}
+
+func printProfileUsage() {
+	fmt.Println("Usage: bislericli profile <subcommand>")
+	fmt.Println("\nAvailable subcommands:")
+	fmt.Println("  list   List all available profiles")
+	fmt.Println("  use    Switch to a different profile")
+}
+
+func printConfigUsage() {
+	fmt.Println("Usage: bislericli config <subcommand>")
+	fmt.Println("\nAvailable subcommands:")
+	fmt.Println("  show   Display current configuration")
+}
+
+func printScheduleUsage() {
+	fmt.Println("Usage: bislericli schedule")
+	fmt.Println()
+	fmt.Println("Show current default scheduling values.")
+}
+
+func printDebugUsage() {
+	fmt.Println("Usage: bislericli debug <subcommand>")
+	fmt.Println("\nAvailable subcommands:")
+	fmt.Println("  order   Start debug order flow")
 }
 
 func resolveProfileName(flagValue string, cfg config.GlobalConfig) string {
