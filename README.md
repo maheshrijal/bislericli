@@ -20,7 +20,7 @@ brew install maheshrijal/tap/bislericli
 go build -o bislericli ./cmd/bislericli
 ```
 
-Capture login (opens Chrome, you log in manually):
+Capture login (OTP in terminal by default):
 
 ```bash
 bislericli auth login
@@ -33,6 +33,11 @@ Place an order (default: 2 jars, return 2 empty jars):
 ```bash
 bislericli order
 ```
+
+If the saved session is expired, `order` now prompts:
+
+- `Session expired. Would you like to log in now? [y/N]`
+- if no answer within 10 seconds, it exits and asks you to run `bislericli auth login` manually
 
 Override defaults:
 
@@ -51,6 +56,8 @@ Check auth status:
 ```bash
 bislericli auth status
 ```
+
+During OTP login, type `r` at the OTP prompt to request a new OTP.
 
 List profiles:
 

@@ -23,9 +23,18 @@ import (
 )
 
 const (
-	bisleriHome    = "https://www.bisleri.com/home"
-	bisleriBaseURL = "https://www.bisleri.com"
-	userAgent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	bisleriHome          = "https://www.bisleri.com/home"
+	bisleriBaseURL       = "https://www.bisleri.com"
+	userAgent            = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	maxOTPResendAttempts = 3
+	maxOTPVerifyAttempts = 5
+)
+
+var (
+	getCSRFTokenFn  = getCSRFToken
+	sendOTPFn       = sendOTP
+	verifyOTPFn     = verifyOTP
+	verifyCookiesFn = verifyCookies
 )
 
 func Login(ctx context.Context) ([]store.Cookie, error) {
@@ -85,47 +94,92 @@ func LoginWithOTP(ctx context.Context, phoneNumber string) ([]store.Cookie, erro
 		Jar:     jar,
 		Timeout: 30 * time.Second,
 	}
+	return loginWithOTPClient(ctx, client, phoneNumber, os.Stdin, os.Stdout)
+}
 
+func loginWithOTPClient(ctx context.Context, client *http.Client, phoneNumber string, input io.Reader, output io.Writer) ([]store.Cookie, error) {
 	// Step 1: Get initial session and CSRF token
-	fmt.Println("Connecting to Bisleri...")
-	csrfToken, err := getCSRFToken(ctx, client)
+	fmt.Fprintln(output, "Connecting to Bisleri...")
+	csrfToken, err := getCSRFTokenFn(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
 	// Step 2: Send OTP
-	fmt.Printf("Sending OTP to +91%s...\n", phoneNumber)
-	if err := sendOTP(ctx, client, phoneNumber, csrfToken); err != nil {
+	fmt.Fprintf(output, "Sending OTP to +91%s...\n", phoneNumber)
+	if err := sendOTPFn(ctx, client, phoneNumber, csrfToken); err != nil {
 		return nil, fmt.Errorf("failed to send OTP: %w", err)
 	}
-	fmt.Println("OTP sent successfully!")
+	fmt.Fprintln(output, "OTP sent successfully!")
 
-	// Step 3: Prompt for OTP
-	fmt.Print("Enter OTP: ")
-	reader := bufio.NewReader(os.Stdin)
-	otpInput, err := reader.ReadString('\n')
-	if err != nil {
-		return nil, fmt.Errorf("failed to read OTP: %w", err)
+	reader := bufio.NewReader(input)
+	resendAttempts := 0
+	verifyAttempts := 0
+
+	for {
+		fmt.Fprint(output, "Enter OTP (6 digits) or type 'r' to resend: ")
+		otpInput, readErr := reader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, fmt.Errorf("failed to read OTP: %w", readErr)
+		}
+		otp := strings.TrimSpace(otpInput)
+		if strings.EqualFold(otp, "r") || strings.EqualFold(otp, "resend") {
+			if resendAttempts >= maxOTPResendAttempts {
+				return nil, fmt.Errorf("OTP resend limit reached (%d); please run login again", maxOTPResendAttempts)
+			}
+			resendAttempts++
+			fmt.Fprintf(output, "Resending OTP (%d/%d)...\n", resendAttempts, maxOTPResendAttempts)
+			if err := sendOTPFn(ctx, client, phoneNumber, csrfToken); err != nil {
+				return nil, fmt.Errorf("failed to resend OTP: %w", err)
+			}
+			fmt.Fprintln(output, "OTP sent successfully!")
+			if errors.Is(readErr, io.EOF) {
+				return nil, errors.New("input ended before OTP could be entered")
+			}
+			continue
+		}
+
+		if !isValidOTP(otp) {
+			if errors.Is(readErr, io.EOF) {
+				return nil, errors.New("OTP must be 6 digits")
+			}
+			fmt.Fprintln(output, "Invalid OTP. Enter 6 digits or type 'r'.")
+			continue
+		}
+
+		verifyAttempts++
+		fmt.Fprintln(output, "Verifying OTP...")
+		cookies, err := verifyOTPFn(ctx, client, phoneNumber, otp, csrfToken)
+		if err != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil, fmt.Errorf("failed to verify OTP: %w", err)
+			}
+			if verifyAttempts >= maxOTPVerifyAttempts {
+				return nil, fmt.Errorf("failed to verify OTP after %d attempts: %w", maxOTPVerifyAttempts, err)
+			}
+			fmt.Fprintf(output, "OTP verification failed: %v\n", err)
+			fmt.Fprintln(output, "Try again or type 'r'.")
+			continue
+		}
+
+		if err := verifyCookiesFn(cookies); err != nil {
+			return nil, fmt.Errorf("login succeeded but session invalid: %w", err)
+		}
+		fmt.Fprintln(output, "Login successful!")
+		return cookies, nil
 	}
-	otp := strings.TrimSpace(otpInput)
+}
+
+func isValidOTP(otp string) bool {
 	if len(otp) != 6 {
-		return nil, errors.New("OTP must be 6 digits")
+		return false
 	}
-
-	// Step 4: Verify OTP
-	fmt.Println("Verifying OTP...")
-	cookies, err := verifyOTP(ctx, client, phoneNumber, otp, csrfToken)
-	if err != nil {
-		return nil, fmt.Errorf("failed to verify OTP: %w", err)
+	for _, ch := range otp {
+		if ch < '0' || ch > '9' {
+			return false
+		}
 	}
-
-	// Step 5: Verify the cookies work
-	if err := verifyCookies(cookies); err != nil {
-		return nil, fmt.Errorf("login succeeded but session invalid: %w", err)
-	}
-
-	fmt.Println("Login successful!")
-	return cookies, nil
+	return true
 }
 
 func getCSRFToken(ctx context.Context, client *http.Client) (string, error) {

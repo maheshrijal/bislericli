@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -25,11 +26,14 @@ import (
 )
 
 const (
-	productID20L = "BIS-20LTR01-90"
+	productID20L       = "BIS-20LTR01-90"
+	loginPromptTimeout = 10 * time.Second
+	orderReauthTimeout = 3 * time.Minute
 )
 
 var (
-	version = "dev"
+	version    = "dev"
+	otpLoginFn = auth.LoginWithOTP
 )
 
 func main() {
@@ -176,15 +180,7 @@ func runAuth(args []string) error {
 				input, _ := reader.ReadString('\n')
 				phoneNumber = strings.TrimSpace(input)
 			}
-			// Clean phone number (remove spaces, dashes first)
-			phoneNumber = strings.ReplaceAll(phoneNumber, " ", "")
-			phoneNumber = strings.ReplaceAll(phoneNumber, "-", "")
-			// Only strip country code if number is too long
-			if strings.HasPrefix(phoneNumber, "+91") && len(phoneNumber) == 13 {
-				phoneNumber = strings.TrimPrefix(phoneNumber, "+91")
-			} else if strings.HasPrefix(phoneNumber, "91") && len(phoneNumber) == 12 {
-				phoneNumber = strings.TrimPrefix(phoneNumber, "91")
-			}
+			phoneNumber = normalizePhoneNumber(phoneNumber)
 
 			if len(phoneNumber) != 10 {
 				return fmt.Errorf("invalid phone number: must be 10 digits, got %d", len(phoneNumber))
@@ -400,56 +396,70 @@ func runOrder(args []string) error {
 		return fmt.Errorf("return jars (%d) cannot exceed order quantity (%d)", *returnJars, *quantity)
 	}
 
-	fmt.Printf("Placing order: %d jar(s), returning %d jar(s)\n", *quantity, *returnJars)
+	runOrderOnce := func() error {
+		fmt.Printf("Placing order: %d jar(s), returning %d jar(s)\n", *quantity, *returnJars)
 
-	jar, err := bisleri.JarFromCookies(profile.Cookies)
-	if err != nil {
-		return err
-	}
-	client := bisleri.NewClient(&http.Client{Jar: jar, Timeout: 40 * time.Second}, log.New(os.Stderr, "bisleri: ", log.LstdFlags))
-	if *debug {
-		client.Debug = true
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	fmt.Println("Checking session...")
-	if err := client.VerifyAuthenticated(ctx); err != nil {
-		return err
-	}
-
-	fmt.Println("Preparing cart...")
-	cartHTML, cartErr := client.FetchCartPage(ctx)
-	if cartErr == nil {
-		updatedHTML, err := ensureCityLocation(ctx, client, profilePath, &profile, cartHTML)
+		jar, err := bisleri.JarFromCookies(profile.Cookies)
 		if err != nil {
 			return err
 		}
-		cartHTML = updatedHTML
-	}
-	if cartErr == nil {
-		cartItems := bisleri.ExtractCartItems(cartHTML)
-		if count, ok := bisleri.ExtractCartCount(cartHTML); ok && count > 0 && len(cartItems) == 0 {
-			return errors.New("unable to parse cart items; please clear cart or try again")
+		client := bisleri.NewClient(&http.Client{Jar: jar, Timeout: 40 * time.Second}, log.New(os.Stderr, "bisleri: ", log.LstdFlags))
+		if *debug {
+			client.Debug = true
 		}
-		extraItems := filterExtraItems(cartItems, productID20L)
-		if len(extraItems) > 0 && !*allowExtra {
-			return fmt.Errorf("cart contains other items; clear cart or pass --allow-extra (items: %s)", strings.Join(extraItems, ", "))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		fmt.Println("Checking session...")
+		if err := client.VerifyAuthenticated(ctx); err != nil {
+			return err
 		}
-		if uuid, existingQty, ok := bisleri.ExtractCartItem(cartHTML, productID20L); ok && uuid != "" {
-			if existingQty != *quantity {
-				fmt.Println("Updating cart quantity...")
-				if err := client.UpdateQuantity(ctx, productID20L, uuid, *quantity); err != nil {
-					return err
+
+		fmt.Println("Preparing cart...")
+		cartHTML, cartErr := client.FetchCartPage(ctx)
+		if cartErr == nil {
+			updatedHTML, err := ensureCityLocation(ctx, client, profilePath, &profile, cartHTML)
+			if err != nil {
+				return err
+			}
+			cartHTML = updatedHTML
+		}
+		if cartErr == nil {
+			cartItems := bisleri.ExtractCartItems(cartHTML)
+			if count, ok := bisleri.ExtractCartCount(cartHTML); ok && count > 0 && len(cartItems) == 0 {
+				return errors.New("unable to parse cart items; please clear cart or try again")
+			}
+			extraItems := filterExtraItems(cartItems, productID20L)
+			if len(extraItems) > 0 && !*allowExtra {
+				return fmt.Errorf("cart contains other items; clear cart or pass --allow-extra (items: %s)", strings.Join(extraItems, ", "))
+			}
+			if uuid, existingQty, ok := bisleri.ExtractCartItem(cartHTML, productID20L); ok && uuid != "" {
+				if existingQty != *quantity {
+					fmt.Println("Updating cart quantity...")
+					if err := client.UpdateQuantity(ctx, productID20L, uuid, *quantity); err != nil {
+						return err
+					}
+				} else {
+					fmt.Println("Cart already at desired quantity.")
 				}
 			} else {
-				fmt.Println("Cart already at desired quantity.")
+				if len(cartItems) > 0 && !*allowExtra {
+					return errors.New("cart is not empty; clear cart or pass --allow-extra")
+				}
+				fmt.Println("Adding product to cart...")
+				if err := client.AddProduct(ctx, productID20L, *quantity); err != nil {
+					return err
+				}
+				if err := confirmCartQuantity(ctx, client, productID20L, *quantity, *allowExtra); err != nil {
+					return err
+				}
 			}
 		} else {
-			if len(cartItems) > 0 && !*allowExtra {
-				return errors.New("cart is not empty; clear cart or pass --allow-extra")
+			if errors.Is(cartErr, bisleri.ErrNotAuthenticated) {
+				return cartErr
 			}
+			fmt.Fprintln(os.Stderr, "Warning: unable to fetch cart; proceeding to add product:", cartErr)
 			fmt.Println("Adding product to cart...")
 			if err := client.AddProduct(ctx, productID20L, *quantity); err != nil {
 				return err
@@ -458,220 +468,236 @@ func runOrder(args []string) error {
 				return err
 			}
 		}
-	} else {
-		if errors.Is(cartErr, bisleri.ErrNotAuthenticated) {
-			return cartErr
-		}
-		fmt.Fprintln(os.Stderr, "Warning: unable to fetch cart; proceeding to add product:", cartErr)
-		fmt.Println("Adding product to cart...")
-		if err := client.AddProduct(ctx, productID20L, *quantity); err != nil {
+		fmt.Println("Setting return jars...")
+		if err := client.UpdateJarQuantity(ctx, *returnJars); err != nil {
 			return err
 		}
-		if err := confirmCartQuantity(ctx, client, productID20L, *quantity, *allowExtra); err != nil {
-			return err
-		}
-	}
-	fmt.Println("Setting return jars...")
-	if err := client.UpdateJarQuantity(ctx, *returnJars); err != nil {
-		return err
-	}
 
-	// Give the server time to process the cart update
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(500 * time.Millisecond):
-	}
+		// Give the server time to process the cart update
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
 
-	if profile.Address != nil && profile.AddressID != "" {
-		addr := *profile.Address
-		if profile.PreferredCity != "" && !strings.EqualFold(addr.City, profile.PreferredCity) {
-			addr.City = profile.PreferredCity
-		}
-		if addr.City == "" {
-			addr.City = profile.PreferredCity
-		}
-		normalizeStateCode(&addr)
-		if addr.Country == "" {
-			addr.Country = "IN"
-		}
-		if addressReadyForLocation(addr) {
-			if err := client.SetSavedAddressLocation(ctx, addr, profile.AddressID); err != nil && *debug {
-				fmt.Fprintln(os.Stderr, "bisleri: set saved address warning:", err)
+		if profile.Address != nil && profile.AddressID != "" {
+			addr := *profile.Address
+			if profile.PreferredCity != "" && !strings.EqualFold(addr.City, profile.PreferredCity) {
+				addr.City = profile.PreferredCity
 			}
-		} else if *debug {
-			fmt.Fprintln(os.Stderr, "bisleri: saved address location skipped (missing fields)")
-		}
-	}
-
-	// Give the server a moment to stabilize before checkout
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(300 * time.Millisecond):
-	}
-
-	fmt.Println("Fetching shipping details...")
-	// Try BeginCheckout first, with retry logic
-	var beginErr error
-	for attempt := 1; attempt <= 2; attempt++ {
-		if err := client.BeginCheckout(ctx); err != nil {
-			beginErr = err
-			if *debug {
-				fmt.Fprintf(os.Stderr, "bisleri: checkout init attempt %d warning: %v\n", attempt, err)
+			if addr.City == "" {
+				addr.City = profile.PreferredCity
 			}
-			if attempt < 2 {
-				// Brief delay before retry
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(time.Second):
+			normalizeStateCode(&addr)
+			if addr.Country == "" {
+				addr.Country = "IN"
+			}
+			if addressReadyForLocation(addr) {
+				if err := client.SetSavedAddressLocation(ctx, addr, profile.AddressID); err != nil && *debug {
+					fmt.Fprintln(os.Stderr, "bisleri: set saved address warning:", err)
 				}
-			}
-		} else {
-			beginErr = nil
-			break
-		}
-	}
-
-	shippingHTML, err := client.FetchShippingPage(ctx)
-	if err != nil {
-		var statusErr *bisleri.HTTPStatusError
-		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusInternalServerError {
-			fmt.Println("Shipping page returned 500. Initializing checkout and retrying...")
-			if retryErr := client.BeginCheckout(ctx); retryErr != nil && *debug {
-				fmt.Fprintln(os.Stderr, "bisleri: checkout retry warning:", retryErr)
-			}
-			shippingHTML, err = client.FetchShippingPage(ctx)
-		}
-		if err != nil {
-			if beginErr != nil {
-				return fmt.Errorf("%w (checkout init error: %v)", err, beginErr)
-			}
-			return err
-		}
-	}
-	csrfToken, err := bisleri.ExtractCSRFToken(shippingHTML)
-	if err != nil {
-		return fmt.Errorf("failed to parse csrf token (session expired?): %w", err)
-	}
-	shipmentUUID, err := bisleri.ExtractShipmentUUID(shippingHTML)
-	if err != nil {
-		// Debug: save shipping HTML to file ONLY if debug is enabled
-		if *debug {
-			debugFile := "/tmp/shipping_page_debug.html"
-			if writeErr := os.WriteFile(debugFile, []byte(shippingHTML), 0600); writeErr == nil {
-				fmt.Fprintf(os.Stderr, "Debug: Shipping HTML saved to %s\n", debugFile)
+			} else if *debug {
+				fmt.Fprintln(os.Stderr, "bisleri: saved address location skipped (missing fields)")
 			}
 		}
-		return fmt.Errorf("failed to parse shipment UUID: %w", err)
-	}
 
-	if profile.Address == nil || profile.AddressID == "" {
-		candidates, err := bisleri.ParseAddressCandidates(shippingHTML)
-		if err != nil {
-			return err
+		// Give the server a moment to stabilize before checkout
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(300 * time.Millisecond):
 		}
-		if len(candidates) == 0 {
-			return errors.New("no address found in account; set a default address on bisleri.com and retry")
-		}
-		choice := selectAddress(candidates)
-		profile.AddressID = choice.ID
-		profile.Address = &choice.Address
-		profile.AddressSource = "shipping-page"
-		ensureAddressComplete(profile.Address)
-		if err := store.SaveProfile(profilePath, profile); err != nil {
-			return err
-		}
-	}
 
-	if !bisleri.AddressIsComplete(*profile.Address) {
-		ensureAddressComplete(profile.Address)
-		if err := store.SaveProfile(profilePath, profile); err != nil {
-			return err
-		}
-	}
-
-	fmt.Println("Submitting shipping info...")
-	if err := client.SubmitShipping(ctx, shipmentUUID, csrfToken, cfg.Defaults.Timeslot, *profile.Address, profile.AddressID); err != nil {
-		return err
-	}
-
-	fmt.Println("Fetching payment page...")
-	paymentHTML, err := client.FetchPaymentPage(ctx)
-	if err != nil {
-		return err
-	}
-	if balance, ok := bisleri.ExtractWalletBalance(paymentHTML); ok {
-		fmt.Println(format.KeyValue("Wallet balance", balance))
-	}
-	if total, ok := bisleri.ExtractOrderTotal(paymentHTML); ok {
-		fmt.Println(format.KeyValue("Order total", total))
-	}
-	// Check order total and wallet balance
-	if total, okTotal := bisleri.ExtractOrderTotal(paymentHTML); okTotal {
-		if totalAmount, okTot := bisleri.ParseINRAmount(total); okTot {
-			if totalAmount <= 0 {
+		fmt.Println("Fetching shipping details...")
+		// Try BeginCheckout first, with retry logic
+		var beginErr error
+		for attempt := 1; attempt <= 2; attempt++ {
+			if err := client.BeginCheckout(ctx); err != nil {
+				beginErr = err
 				if *debug {
-					debugFile := "/tmp/payment_page_fail_total.html"
-					if writeErr := os.WriteFile(debugFile, []byte(paymentHTML), 0600); writeErr == nil {
-						fmt.Fprintf(os.Stderr, "Debug: Payment HTML saved to %s\n", debugFile)
-					}
+					fmt.Fprintf(os.Stderr, "bisleri: checkout init attempt %d warning: %v\n", attempt, err)
 				}
-				return fmt.Errorf("invalid order total detected (%s); check debug html", total)
-			}
-
-			// Balance check
-			if balance, okBal := bisleri.ExtractWalletBalance(paymentHTML); okBal {
-				if balAmount, okBalPars := bisleri.ParseINRAmount(balance); okBalPars {
-					if balAmount < totalAmount {
-						return fmt.Errorf("insufficient wallet balance (%s) for order total (%s)", balance, total)
+				if attempt < 2 {
+					// Brief delay before retry
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(time.Second):
 					}
 				}
 			} else {
-				fmt.Println("Warning: could not detect wallet balance")
+				beginErr = nil
+				break
+			}
+		}
+
+		shippingHTML, err := client.FetchShippingPage(ctx)
+		if err != nil {
+			var statusErr *bisleri.HTTPStatusError
+			if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusInternalServerError {
+				fmt.Println("Shipping page returned 500. Initializing checkout and retrying...")
+				if retryErr := client.BeginCheckout(ctx); retryErr != nil && *debug {
+					fmt.Fprintln(os.Stderr, "bisleri: checkout retry warning:", retryErr)
+				}
+				shippingHTML, err = client.FetchShippingPage(ctx)
+			}
+			if err != nil {
+				if beginErr != nil {
+					return fmt.Errorf("%w (checkout init error: %v)", err, beginErr)
+				}
+				return err
+			}
+		}
+		csrfToken, err := bisleri.ExtractCSRFToken(shippingHTML)
+		if err != nil {
+			return fmt.Errorf("failed to parse csrf token (session expired?): %w", err)
+		}
+		shipmentUUID, err := bisleri.ExtractShipmentUUID(shippingHTML)
+		if err != nil {
+			// Debug: save shipping HTML to file ONLY if debug is enabled
+			if *debug {
+				debugFile := "/tmp/shipping_page_debug.html"
+				if writeErr := os.WriteFile(debugFile, []byte(shippingHTML), 0600); writeErr == nil {
+					fmt.Fprintf(os.Stderr, "Debug: Shipping HTML saved to %s\n", debugFile)
+				}
+			}
+			return fmt.Errorf("failed to parse shipment UUID: %w", err)
+		}
+
+		if profile.Address == nil || profile.AddressID == "" {
+			candidates, err := bisleri.ParseAddressCandidates(shippingHTML)
+			if err != nil {
+				return err
+			}
+			if len(candidates) == 0 {
+				return errors.New("no address found in account; set a default address on bisleri.com and retry")
+			}
+			choice := selectAddress(candidates)
+			profile.AddressID = choice.ID
+			profile.Address = &choice.Address
+			profile.AddressSource = "shipping-page"
+			ensureAddressComplete(profile.Address)
+			if err := store.SaveProfile(profilePath, profile); err != nil {
+				return err
+			}
+		}
+
+		if !bisleri.AddressIsComplete(*profile.Address) {
+			ensureAddressComplete(profile.Address)
+			if err := store.SaveProfile(profilePath, profile); err != nil {
+				return err
+			}
+		}
+
+		fmt.Println("Submitting shipping info...")
+		if err := client.SubmitShipping(ctx, shipmentUUID, csrfToken, cfg.Defaults.Timeslot, *profile.Address, profile.AddressID); err != nil {
+			return err
+		}
+
+		fmt.Println("Fetching payment page...")
+		paymentHTML, err := client.FetchPaymentPage(ctx)
+		if err != nil {
+			return err
+		}
+		if balance, ok := bisleri.ExtractWalletBalance(paymentHTML); ok {
+			fmt.Println(format.KeyValue("Wallet balance", balance))
+		}
+		if total, ok := bisleri.ExtractOrderTotal(paymentHTML); ok {
+			fmt.Println(format.KeyValue("Order total", total))
+		}
+		// Check order total and wallet balance
+		if total, okTotal := bisleri.ExtractOrderTotal(paymentHTML); okTotal {
+			if totalAmount, okTot := bisleri.ParseINRAmount(total); okTot {
+				if totalAmount <= 0 {
+					if *debug {
+						debugFile := "/tmp/payment_page_fail_total.html"
+						if writeErr := os.WriteFile(debugFile, []byte(paymentHTML), 0600); writeErr == nil {
+							fmt.Fprintf(os.Stderr, "Debug: Payment HTML saved to %s\n", debugFile)
+						}
+					}
+					return fmt.Errorf("invalid order total detected (%s); check debug html", total)
+				}
+
+				// Balance check
+				if balance, okBal := bisleri.ExtractWalletBalance(paymentHTML); okBal {
+					if balAmount, okBalPars := bisleri.ParseINRAmount(balance); okBalPars {
+						if balAmount < totalAmount {
+							return fmt.Errorf("insufficient wallet balance (%s) for order total (%s)", balance, total)
+						}
+					}
+				} else {
+					fmt.Println("Warning: could not detect wallet balance")
+				}
+			} else {
+				return fmt.Errorf("failed to parse order total amount: %s", total)
 			}
 		} else {
-			return fmt.Errorf("failed to parse order total amount: %s", total)
-		}
-	} else {
-		if *debug {
-			debugFile := "/tmp/payment_page_no_total.html"
-			if writeErr := os.WriteFile(debugFile, []byte(paymentHTML), 0600); writeErr == nil {
-				fmt.Fprintf(os.Stderr, "Debug: Payment HTML saved to %s\n", debugFile)
+			if *debug {
+				debugFile := "/tmp/payment_page_no_total.html"
+				if writeErr := os.WriteFile(debugFile, []byte(paymentHTML), 0600); writeErr == nil {
+					fmt.Fprintf(os.Stderr, "Debug: Payment HTML saved to %s\n", debugFile)
+				}
 			}
+			return errors.New("failed to detect order total on payment page")
 		}
-		return errors.New("failed to detect order total on payment page")
-	}
-	paymentCSRF, err := bisleri.ExtractCSRFToken(paymentHTML)
-	if err != nil {
-		paymentCSRF = csrfToken
-	}
-	fmt.Println("Submitting payment (Bisleri Wallet)...")
-	if err := client.SubmitPayment(ctx, shipmentUUID, paymentCSRF, *profile.Address); err != nil {
-		return err
-	}
-	fmt.Println("Placing order...")
-	orderID, err := client.PlaceOrder(ctx)
-	if err != nil {
-		return err
-	}
-	if orderID == "" {
-		return errors.New("order placement did not return a valid order ID; check wallet or order history")
-	} else {
+		paymentCSRF, err := bisleri.ExtractCSRFToken(paymentHTML)
+		if err != nil {
+			paymentCSRF = csrfToken
+		}
+		fmt.Println("Submitting payment (Bisleri Wallet)...")
+		if err := client.SubmitPayment(ctx, shipmentUUID, paymentCSRF, *profile.Address); err != nil {
+			return err
+		}
+		fmt.Println("Placing order...")
+		orderID, err := client.PlaceOrder(ctx)
+		if err != nil {
+			return err
+		}
+		if orderID == "" {
+			return errors.New("order placement did not return a valid order ID; check wallet or order history")
+		}
 		fmt.Println("Order placed:", orderID)
 		profile.LastOrder = &store.OrderInfo{OrderID: orderID, PlacedAt: time.Now()}
 		if err := store.SaveProfile(profilePath, profile); err != nil {
 			fmt.Fprintln(os.Stderr, "Warning: failed to save order info:", err)
 		}
-	}
-	if postPaymentHTML, err := client.FetchPaymentPage(ctx); err == nil {
-		if balance, ok := bisleri.ExtractWalletBalance(postPaymentHTML); ok {
-			fmt.Println(format.KeyValue("Wallet balance (post-order)", balance))
+		if postPaymentHTML, err := client.FetchPaymentPage(ctx); err == nil {
+			if balance, ok := bisleri.ExtractWalletBalance(postPaymentHTML); ok {
+				fmt.Println(format.KeyValue("Wallet balance (post-order)", balance))
+			}
 		}
+
+		return nil
 	}
 
-	return nil
+	err = runOrderOnce()
+	if !errors.Is(err, bisleri.ErrNotAuthenticated) {
+		return err
+	}
+
+	confirmed, timedOut, err := confirmLoginPrompt(os.Stdin, os.Stdout, loginPromptTimeout)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		if timedOut {
+			return errors.New("session expired; login confirmation timed out after 10s. please run 'bislericli auth login'")
+		}
+		return errors.New("session expired; please run 'bislericli auth login'")
+	}
+
+	loginCtx, loginCancel := context.WithTimeout(context.Background(), orderReauthTimeout)
+	defer loginCancel()
+	if err := refreshSessionForOrder(loginCtx, profilePath, &profile, os.Stdin, os.Stdout); err != nil {
+		return fmt.Errorf("automatic login failed: %w", err)
+	}
+
+	fmt.Println("Retrying order after login...")
+	err = runOrderOnce()
+	if errors.Is(err, bisleri.ErrNotAuthenticated) {
+		return errors.New("session expired after re-login; please run 'bislericli auth login'")
+	}
+	return err
 }
 
 func runConfig(args []string) error {
@@ -763,6 +789,7 @@ func printAuthUsage() {
 	fmt.Println("  login    Interactive login to Bisleri account")
 	fmt.Println("  logout   Logout from the current session")
 	fmt.Println("  status   Check current login status")
+	fmt.Println("\nTip: OTP login supports typing 'r' on the OTP prompt to resend.")
 }
 
 func printProfileUsage() {
@@ -1154,4 +1181,100 @@ func loadOrCreateProfile(name string) (store.Profile, string, error) {
 		return store.Profile{}, "", err
 	}
 	return profile, profilePath, nil
+}
+
+func confirmLoginPrompt(input io.Reader, output io.Writer, timeout time.Duration) (confirmed bool, timedOut bool, err error) {
+	fmt.Fprint(output, "Session expired. Would you like to log in now? [y/N]: ")
+	line, timedOut, err := readLineWithTimeout(input, timeout)
+	if err != nil {
+		return false, false, err
+	}
+	if timedOut {
+		fmt.Fprintln(output)
+		return false, true, nil
+	}
+	answer := strings.TrimSpace(strings.ToLower(line))
+	return answer == "y" || answer == "yes", false, nil
+}
+
+func readLineWithTimeout(input io.Reader, timeout time.Duration) (line string, timedOut bool, err error) {
+	type readResult struct {
+		line string
+		err  error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		reader := bufio.NewReader(input)
+		line, err := reader.ReadString('\n')
+		resultCh <- readResult{line: line, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		if result.err != nil && !errors.Is(result.err, io.EOF) {
+			return "", false, result.err
+		}
+		return result.line, false, nil
+	case <-time.After(timeout):
+		return "", true, nil
+	}
+}
+
+func refreshSessionForOrder(ctx context.Context, profilePath string, profile *store.Profile, input io.Reader, output io.Writer) error {
+	phoneNumber, err := resolvePhoneNumberForOTP(profile.PhoneNumber, input, output)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(output, "Starting OTP login...")
+	cookies, err := otpLoginFn(ctx, phoneNumber)
+	if err != nil {
+		return fmt.Errorf("login failed: %w", err)
+	}
+	profile.Cookies = cookies
+	profile.PhoneNumber = phoneNumber
+	profile.LastLogin = time.Now()
+	if err := store.SaveProfile(profilePath, *profile); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resolvePhoneNumberForOTP(savedPhone string, input io.Reader, output io.Writer) (string, error) {
+	reader := bufio.NewReader(input)
+	phoneNumber := strings.TrimSpace(savedPhone)
+	if phoneNumber != "" {
+		fmt.Fprintf(output, "Phone number [%s]: ", phoneNumber)
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("failed to read phone number: %w", err)
+		}
+		line = strings.TrimSpace(line)
+		if line != "" {
+			phoneNumber = line
+		}
+	} else {
+		fmt.Fprint(output, "Phone number: ")
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("failed to read phone number: %w", err)
+		}
+		phoneNumber = strings.TrimSpace(line)
+	}
+
+	phoneNumber = normalizePhoneNumber(phoneNumber)
+	if len(phoneNumber) != 10 {
+		return "", fmt.Errorf("invalid phone number: must be 10 digits, got %d", len(phoneNumber))
+	}
+	return phoneNumber, nil
+}
+
+func normalizePhoneNumber(phoneNumber string) string {
+	phoneNumber = strings.ReplaceAll(phoneNumber, " ", "")
+	phoneNumber = strings.ReplaceAll(phoneNumber, "-", "")
+	if strings.HasPrefix(phoneNumber, "+91") && len(phoneNumber) == 13 {
+		return strings.TrimPrefix(phoneNumber, "+91")
+	}
+	if strings.HasPrefix(phoneNumber, "91") && len(phoneNumber) == 12 {
+		return strings.TrimPrefix(phoneNumber, "91")
+	}
+	return phoneNumber
 }
