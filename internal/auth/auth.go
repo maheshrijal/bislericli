@@ -505,7 +505,7 @@ func filterNetworkCookies(cookies []*network.Cookie) []store.Cookie {
 		if isExpired(c.Expires) {
 			continue
 		}
-		if !strings.Contains(c.Domain, "bisleri.com") {
+		if !isBisleriDomain(c.Domain) {
 			continue
 		}
 		filtered = append(filtered, store.Cookie{
@@ -531,7 +531,7 @@ func filterStorageCookies(cookies []*network.Cookie) []store.Cookie {
 		if isExpired(c.Expires) {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(c.Domain), "bisleri.com") {
+		if !isBisleriDomain(c.Domain) {
 			continue
 		}
 		filtered = append(filtered, store.Cookie{
@@ -600,6 +600,11 @@ func verifyCookies(cookies []store.Cookie) error {
 		return fmt.Errorf("cookie verification failed: %s", resp.Status)
 	}
 	return nil
+}
+
+func isBisleriDomain(domain string) bool {
+	d := strings.ToLower(strings.TrimPrefix(domain, "."))
+	return d == "bisleri.com" || strings.HasSuffix(d, ".bisleri.com")
 }
 
 // Note: we avoid opening new tabs during login detection to keep UX seamless.

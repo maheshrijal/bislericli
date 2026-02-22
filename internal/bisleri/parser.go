@@ -630,10 +630,15 @@ func ExtractCartItem(html, productID string) (string, int, bool) {
 
 func atoiSafe(value string) int {
 	n := 0
+	found := false
 	for _, r := range value {
 		if r < '0' || r > '9' {
-			return 0
+			if found {
+				break
+			}
+			continue
 		}
+		found = true
 		n = n*10 + int(r-'0')
 	}
 	return n

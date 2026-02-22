@@ -4,10 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"time"
 
+	"bislericli/internal/config"
 	"bislericli/internal/store"
 
 	"github.com/chromedp/cdproto/network"
@@ -61,8 +60,10 @@ func main() {
 	fmt.Printf("Captured %d cookies\n", len(storeCookies))
 
 	// Load existing profile
-	homeDir, _ := os.UserHomeDir()
-	profilePath := filepath.Join(homeDir, "Library", "Application Support", "bislericli", "profiles", "default.json")
+	profilePath, err := config.ProfilePath("default")
+	if err != nil {
+		log.Fatalf("Failed to resolve profile path: %v", err)
+	}
 	
 	profile, err := store.LoadProfile(profilePath)
 	if err != nil {
