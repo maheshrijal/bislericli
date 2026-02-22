@@ -556,7 +556,7 @@ func runOrder(args []string) error {
 		if err != nil {
 			// Debug: save shipping HTML to file ONLY if debug is enabled
 			if *debug {
-				debugFile := "/tmp/shipping_page_debug.html"
+				debugFile := debugFilePath("shipping_page_debug.html")
 				if writeErr := os.WriteFile(debugFile, []byte(shippingHTML), 0600); writeErr == nil {
 					fmt.Fprintf(os.Stderr, "Debug: Shipping HTML saved to %s\n", debugFile)
 				}
@@ -610,7 +610,7 @@ func runOrder(args []string) error {
 			if totalAmount, okTot := bisleri.ParseINRAmount(total); okTot {
 				if totalAmount <= 0 {
 					if *debug {
-						debugFile := "/tmp/payment_page_fail_total.html"
+						debugFile := debugFilePath("payment_page_fail_total.html")
 						if writeErr := os.WriteFile(debugFile, []byte(paymentHTML), 0600); writeErr == nil {
 							fmt.Fprintf(os.Stderr, "Debug: Payment HTML saved to %s\n", debugFile)
 						}
@@ -633,7 +633,7 @@ func runOrder(args []string) error {
 			}
 		} else {
 			if *debug {
-				debugFile := "/tmp/payment_page_no_total.html"
+				debugFile := debugFilePath("payment_page_no_total.html")
 				if writeErr := os.WriteFile(debugFile, []byte(paymentHTML), 0600); writeErr == nil {
 					fmt.Fprintf(os.Stderr, "Debug: Payment HTML saved to %s\n", debugFile)
 				}
@@ -1265,6 +1265,16 @@ func resolvePhoneNumberForOTP(savedPhone string, input io.Reader, output io.Writ
 		return "", fmt.Errorf("invalid phone number: must be 10 digits, got %d", len(phoneNumber))
 	}
 	return phoneNumber, nil
+}
+
+func debugFilePath(name string) string {
+	dir, err := config.ConfigDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), name)
+	}
+	debugDir := filepath.Join(dir, "debug")
+	_ = os.MkdirAll(debugDir, 0o700)
+	return filepath.Join(debugDir, name)
 }
 
 func normalizePhoneNumber(phoneNumber string) string {

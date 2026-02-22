@@ -28,22 +28,30 @@ const (
 )
 
 func ConfigDir() (string, error) {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
 		return filepath.Join(home, "Library", "Application Support", "bislericli"), nil
+	case "windows":
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, "bislericli"), nil
+	default:
+		// Linux and others: honor XDG_CONFIG_HOME
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, "bislericli"), nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".config", "bislericli"), nil
 	}
-	// Linux and others: honor XDG_CONFIG_HOME
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bislericli"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "bislericli"), nil
 }
 
 func EnsureConfigDir() (string, error) {
